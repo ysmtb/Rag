@@ -1,0 +1,29 @@
+# Web framework
+fastapi[standard]>=0.115.0
+
+# Config — reads .env file automatically
+pydantic-settings==2.2.1
+
+# Vector store — pure Python, saves to a local folder (no server needed)
+chromadb==0.5.0
+
+# Local embedding + reranker models (downloaded from HuggingFace once)
+sentence-transformers==2.7.0
+torch==2.3.0
+
+# BM25 keyword search (sparse retrieval)
+rank-bm25==0.2.2
+
+# PDF text extraction
+pypdf==4.2.0
+
+# Groq LLM — free tier
+groq==0.9.0
+
+# Frontend UI
+streamlit>=1.38.0
+requests>=2.32.3
+
+# Testing
+pytest==8.1.1
+httpx==0.27.0       # needed for FastAPI TestClient

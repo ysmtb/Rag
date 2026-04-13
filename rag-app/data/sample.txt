@@ -1,0 +1,16 @@
+Retrieval-Augmented Generation (RAG) is a technique that improves large language model responses by retrieving relevant documents from a knowledge base before generating an answer.
+
+The main advantage of RAG over a plain LLM is that it can access up-to-date information without retraining the model. Instead of relying solely on what the model learned during training, RAG fetches relevant text chunks and feeds them into the prompt as context.
+
+A typical RAG pipeline has the following steps:
+1. Document ingestion: Split documents into chunks and store their embeddings in a vector database.
+2. Query classification: Decide whether the question actually needs retrieval or can be answered directly.
+3. Hybrid retrieval: Combine BM25 keyword search with dense vector search for better recall.
+4. Reranking: Use a cross-encoder to re-score the top candidates for higher precision.
+5. Generation: Pass the reranked context to an LLM to produce the final answer.
+
+Research has shown that hybrid retrieval (BM25 + dense) consistently outperforms either approach alone. An alpha value of 0.3 for BM25 weighting is considered optimal.
+
+Reranking is a critical step. Removing it leads to the largest single drop in answer quality across all benchmarks tested.
+
+The order of context chunks in the prompt also matters. Placing the highest-ranked chunk closest to the question (called reverse repacking) gives the best results because language models pay more attention to text near the end of the prompt.
