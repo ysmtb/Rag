@@ -12,7 +12,7 @@ import pypdf
 from typing import Optional
 
 import os
-from chromadb import Schema, DenseEmbeddingFunction, SparseEmbeddingFunction
+import chromadb
 from groq import Groq
 
 
