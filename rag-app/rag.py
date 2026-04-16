@@ -11,8 +11,8 @@ import chromadb
 import pypdf
 from typing import Optional
 
-from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer, CrossEncoder
+import os
+from chromadb import Schema, DenseEmbeddingFunction, SparseEmbeddingFunction
 from groq import Groq
 
 
@@ -28,7 +28,12 @@ class RAGConfig:
     alpha: float = 0.3
     chunk_size: int = 512
     chunk_overlap: int = 20
-    chroma_persist_dir: str = "./chroma_db"
+    
+    # ── Chroma Cloud Auth ──
+    chroma_host: str = os.environ.get("CHROMA_HOST", "api.trychroma.com")
+    chroma_tenant: str = os.environ.get("CHROMA_TENANT", "")
+    chroma_database: str = os.environ.get("CHROMA_DATABASE", "")
+    chroma_api_key: str = os.environ.get("CHROMA_API_KEY", "")
 
 config = RAGConfig()
 
@@ -73,74 +78,58 @@ def chunk_text(text: str) -> list[dict]:
 # ── 2. Models (Loaded lazily) ─────────────────────────────────────────────────
 
 # Caching instances so they don't reload on every request
-_embedder_model = None
-_reranker_model = None
 _vector_store = None
-_bm25_index = None
-_bm25_texts = []
-
-def get_embedder() -> SentenceTransformer:
-    global _embedder_model
-    if _embedder_model is None:
-        print("[rag] Loading embedding model (BAAI/bge-small-en-v1.5) ...")
-        _embedder_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
-    return _embedder_model
-
-def get_reranker() -> CrossEncoder:
-    global _reranker_model
-    if _reranker_model is None:
-        print("[rag] Loading reranker model (ms-marco-MiniLM-L-6-v2) ...")
-        _reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-    return _reranker_model
 
 def get_store() -> chromadb.Collection:
     global _vector_store
     if _vector_store is None:
-        client = chromadb.PersistentClient(path=config.chroma_persist_dir)
-        _vector_store = client.get_or_create_collection(
-            name="rag_documents", 
-            metadata={"hnsw:space": "cosine"}
+        client = chromadb.CloudClient(
+            tenant=config.chroma_tenant, 
+            database=config.chroma_database, 
+            api_key=config.chroma_api_key
         )
-        print(f"[rag] ChromaDB ready. Chunks stored: {_vector_store.count()}")
+        
+        # Chroma Cloud natively handles Qwen dense embeddings and Splade sparse embeddings via Schema
+        _vector_store = client.get_or_create_collection(
+            name="rag_documents_cloud", 
+            schema=Schema(
+                dense=DenseEmbeddingFunction("Chroma Cloud Qwen"),
+                sparse=SparseEmbeddingFunction("Chroma Cloud Splade")
+            )
+        )
+        print(f"[rag] Chroma Cloud ready. Chunks stored: {_vector_store.count()}")
     return _vector_store
 
 
 # ── 3. Database & Indexing Operations ─────────────────────────────────────────
 
 def ingest_document(file_bytes: bytes, filename: str) -> int:
-    """Extract, chunk, embed, and store document in ChromaDB."""
+    """Extract, chunk, embed, and store document in Chroma Cloud."""
     text = extract_text(file_bytes, filename)
     if not text.strip(): raise ValueError("File is empty.")
     
     chunks = chunk_text(text)
-    texts = [c["text"] for c in chunks]
     
-    embedder = get_embedder()
-    embeddings = embedder.encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
+    # Enforce 16 KiB limit
+    valid_chunks = []
+    for c in chunks:
+        if len(c["text"].encode('utf-8')) <= 16000:
+            valid_chunks.append(c)
+        else:
+            print(f"[rag] Warning: Dropping chunk from {filename} exceeding 16KiB limit.")
     
+    if not valid_chunks: return 0
+    
+    texts = [c["text"] for c in valid_chunks]
     store = get_store()
-    ids = [f"{filename}__{c['chunk_id']}" for c in chunks]
-    metadatas = [{"source": filename, "chunk_id": c["chunk_id"]} for c in chunks]
+    ids = [f"{filename}__{c['chunk_id']}" for c in valid_chunks]
     
-    store.upsert(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
+    # Use source_document_id for GroupBy deduplication
+    metadatas = [{"source": filename, "source_document_id": filename, "chunk_id": c["chunk_id"]} for c in valid_chunks]
     
-    # Rebuild BM25 search index
-    build_bm25_index()
-    return len(chunks)
-
-def build_bm25_index():
-    """Extract all text from ChromaDB and rebuild the fast lexical search index."""
-    global _bm25_index, _bm25_texts
-    store = get_store()
-    total = store.count()
-    if total == 0: return
-
-    result = store.get(include=["documents"])
-    _bm25_texts = result["documents"]
-    
-    tokenized = [text.lower().split() for text in _bm25_texts]
-    _bm25_index = BM25Okapi(tokenized)
-    print(f"[rag] BM25 Index rebuilt. {total} chunks ready.")
+    # Cloud Schema handles dense/sparse natively; upsert raw text!
+    store.upsert(ids=ids, documents=texts, metadatas=metadatas)
+    return len(valid_chunks)
 
 
 # ── 4. Query Pipeline ─────────────────────────────────────────────────────────
@@ -164,59 +153,35 @@ def classify_query(query: str) -> str:
         return "insufficient"
 
 def hybrid_search(query: str) -> list[dict]:
-    """Combine BM25 (Keyword) and Sparse Embeddings (Semantic) retrieval."""
+    """Native Cloud Hybrid Search with Deduplication."""
     store = get_store()
-    if store.count() == 0: return []
-    top_k = config.top_k
-    
-    # 1. Dense (Semantic Search)
-    q_embed = get_embedder().encode(query, normalize_embeddings=True).tolist()
-    dense_results = store.query(query_embeddings=[q_embed], n_results=min(top_k * 3, store.count()), include=["documents", "metadatas", "distances"])
-    
-    dense_map = {}
-    if dense_results["documents"]:
-        for d_text, meta, dist in zip(dense_results["documents"][0], dense_results["metadatas"][0], dense_results["distances"][0]):
-            dense_map[d_text] = {"distance": dist, "meta": meta}
-
-    # 2. Sparse (BM25 Keyword Search)
-    bm25_map = {}
-    if _bm25_index:
-        scores = _bm25_index.get_scores(query.lower().split())
-        for i, text in enumerate(_bm25_texts):
-            if scores[i] > 0: bm25_map[text] = scores[i]
-
-    # Combine and Normalize
-    all_texts = set(dense_map.keys()) | set(bm25_map.keys())
-    raw_dense = []
-    raw_bm25 = []
-    candidates = []
-
-    for text in all_texts:
-        hit = dense_map.get(text, {"distance": 1.0, "meta": {"source": "bm25", "chunk_id": "unknown"}})
-        raw_dense.append(1.0 - hit["distance"])
-        raw_bm25.append(bm25_map.get(text, 0.0))
-        candidates.append({"text": text, "source": hit["meta"].get("source", ""), "chunk_id": hit["meta"].get("chunk_id", "")})
-
-    def norm(arr):
-        a = np.array(arr, dtype=float)
-        return [0.0]*len(a) if a.max() == a.min() else ((a - a.min()) / (a.max() - a.min())).tolist()
-    
-    n_dense, n_bm25 = norm(raw_dense), norm(raw_bm25)
-    for i, c in enumerate(candidates):
-        c["score"] = (config.alpha * n_bm25[i]) + ((1 - config.alpha) * n_dense[i])
-        
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates[:top_k]
+    try:
+        # Offload RRF math and grouping to the cloud!
+        results = store.search(query=query) \
+            .group_by("source_document_id") \
+            .limit(config.top_k) \
+            .get()
+            
+        candidates = []
+        if results and hasattr(results, 'documents') and results.documents:
+            docs = results.documents[0] if isinstance(results.documents[0], list) else results.documents
+            metas = results.metadatas[0] if isinstance(results.metadatas[0], list) else results.metadatas
+            for d_text, meta in zip(docs, metas):
+                candidates.append({
+                    "text": d_text,
+                    "source": meta.get("source", ""),
+                    "chunk_id": meta.get("chunk_id", ""),
+                    "score": 1.0  # RRF score is handled by Chroma
+                })
+        return candidates
+    except Exception as e:
+        print(f"[rag] Cloud Search Error: {e}")
+        return []
 
 def rerank_and_repack(query: str, chunks: list[dict]) -> list[dict]:
-    """Precise reranking and 'reverse repacking' (best chunk is closest to question)."""
+    """Cloud handles reranking natively via RRF, simply repack here."""
     if not chunks: return []
-    reranker = get_reranker()
-    pairs = [(query, c["text"]) for c in chunks]
-    scores = reranker.predict(pairs)
-    
-    for c, score in zip(chunks, scores): c["rerank_score"] = float(score)
-    top = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)[:config.top_n]
+    top = chunks[:config.top_n]
     return list(reversed(top)) # Best chunk placed last
 
 def generate_answer(query: str, reversed_chunks: list[dict]) -> dict:
