@@ -151,30 +151,37 @@ def classify_query(query: str) -> str:
         return "insufficient"
 
 def hybrid_search(query: str) -> list[dict]:
-    """Native Cloud Hybrid Search with Deduplication."""
+    """Native Cloud Search."""
     store = get_store()
     try:
-        # Offload RRF math and grouping to the cloud!
-        results = store.search(query=query) \
-            .group_by("source_document_id") \
-            .limit(config.top_k) \
-            .get()
+        # Standard robust query syntax
+        results = store.query(
+            query_texts=[query],
+            n_results=config.top_k,
+            include=["documents", "metadatas"]
+        )
             
         candidates = []
-        if results and hasattr(results, 'documents') and results.documents:
-            docs = results.documents[0] if isinstance(results.documents[0], list) else results.documents
-            metas = results.metadatas[0] if isinstance(results.metadatas[0], list) else results.metadatas
+        if results and results.get("documents") and results["documents"]:
+            # Chroma returns lists of lists
+            docs = results["documents"][0]
+            metas = results["metadatas"][0]
             for d_text, meta in zip(docs, metas):
                 candidates.append({
                     "text": d_text,
                     "source": meta.get("source", ""),
                     "chunk_id": meta.get("chunk_id", ""),
-                    "score": 1.0  # RRF score is handled by Chroma
+                    "score": 1.0
                 })
         return candidates
     except Exception as e:
         print(f"[rag] Cloud Search Error: {e}")
-        return []
+        # If it's empty, explicitly return empty to trigger "No documents"
+        if "empty" in str(e).lower() or "not found" in str(e).lower():
+            return []
+        
+        # Otherwise, surface the crash to the LLM so you see it in the chat!
+        return [{"text": f"CRASH LOG: Database querying failed with error: {str(e)}", "source": "API", "chunk_id": "error", "score": 1.0}]
 
 def rerank_and_repack(query: str, chunks: list[dict]) -> list[dict]:
     """Cloud handles reranking natively via RRF, simply repack here."""
