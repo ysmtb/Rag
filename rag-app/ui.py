@@ -1,9 +1,8 @@
 import streamlit as st
-import requests
 import time
+from rag import ask_pipeline, ingest_document
 
-# Configurations
-API_URL = "http://localhost:8000"
+# No API required! We are completely serverless.
 
 st.set_page_config(page_title="RAG Assistant", page_icon="📚", layout="centered")
 
@@ -19,31 +18,13 @@ with st.sidebar:
         if uploaded_file is not None:
             with st.spinner("Processing (Extracting, Chunking, Embedding)..."):
                 try:
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                    response = requests.post(f"{API_URL}/ingest", files=files)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.success(f"✅ Document ingested!\n\n**{data['chunks_stored']}** chunks created.")
-                    else:
-                        st.error(f"Error {response.status_code}: {response.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("🚨 Cannot connect to backend. Did you run `make run`?")
+                    # Pass the file directly to our RAG ingestor logic
+                    chunks = ingest_document(uploaded_file.getvalue(), uploaded_file.name)
+                    st.success(f"✅ Document ingested!\n\n**{chunks}** valid chunks sent to Chroma Cloud.")
+                except Exception as e:
+                    st.error(f"🚨 Ingestion Error: {str(e)}")
         else:
             st.warning("Please upload a file first.")
-
-    st.divider()
-    st.header("System Status")
-    try:
-        health_resp = requests.get(f"{API_URL}/health")
-        if health_resp.status_code == 200:
-            chunks = health_resp.json().get("chunks_in_store", 0)
-            st.metric("Total Fragments Stored", chunks)
-            st.success("API is Online ✅")
-        else:
-            st.error("API is Offline ❌")
-    except:
-        st.error("API is Offline ❌\nPlease run `make run` in your terminal.")
 
 
 # ── Chat Interface ────────────────────────────────────────────────────────────
@@ -64,37 +45,32 @@ if prompt := st.chat_input("Ask a question about your documents..."):
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Call the backend API
+    # Call the backend logic directly!
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
+            start_time = time.time()
             try:
-                start_time = time.time()
-                response = requests.post(f"{API_URL}/ask", json={"query": prompt})
+                # Call the pure python function
+                data = ask_pipeline(prompt)
+                answer_text = data.get("answer", "Error: No answer provided.")
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    answer_text = data["answer"]
-                    
-                    st.markdown(answer_text)
-                    
-                    # Display Sources if RAG was used
-                    if data.get("retrieved") and data.get("sources"):
-                        with st.expander("🔍 View Sources & Context", expanded=False):
-                            for idx, source in enumerate(data["sources"], 1):
-                                st.markdown(f"**Source {idx}:** `{source.get('source', 'unknown')}`")
-                                st.caption(f"> {source.get('text', '')}")
-                    
-                    # Show latency footer
-                    total_latency = int((time.time() - start_time) * 1000)
-                    if not data.get("retrieved"):
-                        st.caption(f"⚡ *Answered directly by LLM in {total_latency}ms (Skipped DB Search)*")
-                    else:
-                        st.caption(f"⏱ *RAG Pipeline took {total_latency}ms*")
-
-                    st.session_state.messages.append({"role": "assistant", "content": answer_text})
+                st.markdown(answer_text)
                 
+                # Display Sources if RAG was used
+                if data.get("retrieved") and data.get("sources"):
+                    with st.expander("🔍 View Sources & Context", expanded=False):
+                        for idx, source in enumerate(data["sources"], 1):
+                            st.markdown(f"**Source {idx}:** `{source.get('source', 'unknown')}`")
+                            st.caption(f"> {source.get('text', '')}")
+                
+                # Show latency footer
+                total_latency = int((time.time() - start_time) * 1000)
+                if not data.get("retrieved"):
+                    st.caption(f"⚡ *Answered directly by LLM in {total_latency}ms (Skipped DB Search)*")
                 else:
-                    st.error(f"Backend Error: {response.status_code}")
-                    
-            except requests.exceptions.ConnectionError:
-                st.error("🚨 Cannot connect to API. Please make sure `make run` is running in another terminal window.")
+                    st.caption(f"⏱ *RAG Pipeline took {total_latency}ms*")
+
+                st.session_state.messages.append({"role": "assistant", "content": answer_text})
+                
+            except Exception as e:
+                st.error(f"🚨 Logic Error: {str(e)}")
