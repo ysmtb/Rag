@@ -5,7 +5,7 @@ fastapi[standard]>=0.115.0
 pydantic-settings==2.2.1
 
 # Vector store — updated to use Chroma Cloud (Serverless)
-chromadb>=0.6.0
+chromadb==1.5.7
 
 
 # PDF text extraction
