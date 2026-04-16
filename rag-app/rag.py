@@ -17,23 +17,25 @@ from groq import Groq
 
 
 # ── Configuration (Loaded in main.py) ─────────────────────────────────────────
+from pydantic_settings import BaseSettings
 
-# We hold settings globally here so main.py can inject them.
-# Minimal default configuration.
-class RAGConfig:
+class RAGConfig(BaseSettings):
     groq_api_key: str = ""
     llm_model: str = "llama-3.3-70b-versatile"
     top_k: int = 10
     top_n: int = 5
-    alpha: float = 0.3
     chunk_size: int = 512
     chunk_overlap: int = 20
     
     # ── Chroma Cloud Auth ──
-    chroma_host: str = os.environ.get("CHROMA_HOST", "api.trychroma.com")
-    chroma_tenant: str = os.environ.get("CHROMA_TENANT", "")
-    chroma_database: str = os.environ.get("CHROMA_DATABASE", "")
-    chroma_api_key: str = os.environ.get("CHROMA_API_KEY", "")
+    chroma_host: str = "api.trychroma.com"
+    chroma_tenant: str = ""
+    chroma_database: str = ""
+    chroma_api_key: str = ""
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
 
 config = RAGConfig()
 
