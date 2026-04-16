@@ -89,13 +89,9 @@ def get_store() -> chromadb.Collection:
             api_key=config.chroma_api_key
         )
         
-        # Chroma Cloud natively handles Qwen dense embeddings and Splade sparse embeddings via Schema
+        # Cloud Schema handles dense/sparse natively if configured in dashboard
         _vector_store = client.get_or_create_collection(
-            name="rag_documents_cloud", 
-            schema=Schema(
-                dense=DenseEmbeddingFunction("Chroma Cloud Qwen"),
-                sparse=SparseEmbeddingFunction("Chroma Cloud Splade")
-            )
+            name="rag_documents_cloud"
         )
         print(f"[rag] Chroma Cloud ready. Chunks stored: {_vector_store.count()}")
     return _vector_store
